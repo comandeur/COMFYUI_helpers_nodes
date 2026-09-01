@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-helpers-nodes"
+description = "A small pack of ComfyUI helper nodes."
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["Pillow", "numpy"]
+
+[project.urls]
+Repository = "https://github.com/comandeur/COMFYUI_helpers_nodes"
+
+[tool.comfy]
+PublisherId = "comandeur"
+DisplayName = "COMFYUI helpers nodes"
+Repository = "https://github.com/comandeur/COMFYUI_helpers_nodes"
