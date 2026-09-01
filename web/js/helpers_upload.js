@@ -6,7 +6,8 @@ import { api } from "../../../scripts/api.js";
 // an animation-aware accept list, plus an <img> preview (an <img> plays gif and
 // animated webp natively, no player needed).
 
-const TARGET_NODES = ["Helpers_LoadAnimationUpload"];
+// the Helpers_ id predates the CMDR_ rename; old workflows still get the widget
+const TARGET_NODES = ["CMDR_LoadAnimationUpload", "Helpers_LoadAnimationUpload"];
 const ACCEPT_MIME = ["image/gif", "image/webp", "image/apng", "image/png"];
 const ACCEPT = ".gif,.webp,.apng,image/gif,image/webp,image/apng";
 
@@ -174,7 +175,7 @@ function addAnimationPreview(nodeType, widgetName = "image") {
 }
 
 app.registerExtension({
-    name: "Helpers.AnimationUpload",
+    name: "comandeur.helpers.animationUpload",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (!TARGET_NODES.includes(nodeData?.name)) {
             return;

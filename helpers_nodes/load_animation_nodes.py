@@ -393,9 +393,19 @@ class LoadAnimationUpload:
         return True
 
 
+class LegacyLoadAnimationUpload(LoadAnimationUpload):
+    """The pre-CMDR_ node id, so workflows saved with it still resolve.
+
+    DEPRECATED keeps it out of the node search without breaking anything.
+    """
+    DEPRECATED = True
+
+
 NODE_CLASS_MAPPINGS = {
-    "Helpers_LoadAnimationUpload": LoadAnimationUpload,
+    "CMDR_LoadAnimationUpload": LoadAnimationUpload,
+    "Helpers_LoadAnimationUpload": LegacyLoadAnimationUpload,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Helpers_LoadAnimationUpload": "Load GIF/WebP (Upload) 🧰",
+    "CMDR_LoadAnimationUpload": "Load GIF/WebP (Upload) 🧰",
+    "Helpers_LoadAnimationUpload": "Load GIF/WebP (Upload) 🧰 (old id)",
 }

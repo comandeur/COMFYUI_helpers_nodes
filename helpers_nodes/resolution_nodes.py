@@ -85,9 +85,16 @@ class ScaleResolutionToMegapixels:
         return scale_to_megapixels(width, height, megapixels, multiple)
 
 
+class LegacyScaleResolutionToMegapixels(ScaleResolutionToMegapixels):
+    """The pre-CMDR_ node id, so workflows saved with it still resolve."""
+    DEPRECATED = True
+
+
 NODE_CLASS_MAPPINGS = {
-    "Helpers_ScaleResolutionToMegapixels": ScaleResolutionToMegapixels,
+    "CMDR_ScaleResolutionToMegapixels": ScaleResolutionToMegapixels,
+    "Helpers_ScaleResolutionToMegapixels": LegacyScaleResolutionToMegapixels,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Helpers_ScaleResolutionToMegapixels": "Scale Resolution to Megapixels 🧰",
+    "CMDR_ScaleResolutionToMegapixels": "Scale Resolution to Megapixels 🧰",
+    "Helpers_ScaleResolutionToMegapixels": "Scale Resolution to Megapixels 🧰 (old id)",
 }

@@ -13,11 +13,22 @@ git clone https://github.com/comandeur/COMFYUI_helpers_nodes
 Restart ComfyUI. No extra dependencies beyond what ComfyUI already ships
 (Pillow, numpy, torch, psutil).
 
+### Node ids
+
+Node ids are prefixed `CMDR_` rather than something generic, because
+`NODE_CLASS_MAPPINGS` is a single flat namespace shared by every installed pack:
+two packs claiming the same key overwrite each other silently, and workflows
+saved with either one then resolve to whichever loaded last.
+
+The pre-0.4.0 `Helpers_` ids are still registered as `DEPRECATED` aliases, so
+workflows saved before the rename keep working. They are hidden from the node
+search; open such a workflow, drop in the `CMDR_` node, and the alias can go.
+
 ---
 
 ## Load GIF/WebP (Upload) 🧰
 
-`Helpers_LoadAnimationUpload`
+`CMDR_LoadAnimationUpload`
 
 A GIF / animated WebP / APNG loader shaped exactly like VideoHelperSuite's
 *Load Video (Upload)*: same widgets, same four outputs, same socket types — so
@@ -77,7 +88,7 @@ of leaving trails.
 
 ## RTX Video Upscale (IMAGE) 🧰
 
-`Helpers_RTXVideoUpscale`
+`CMDR_RTXVideoUpscale`
 
 NVIDIA RTX Video Super Resolution applied to an `IMAGE` batch, in place in the
 workflow: **IMAGE + AUDIO in, upscaled IMAGE + the same AUDIO out.** No video
@@ -141,7 +152,7 @@ aspect ratio exactly.
 
 ## Scale Resolution to Megapixels 🧰
 
-`Helpers_ScaleResolutionToMegapixels`
+`CMDR_ScaleResolutionToMegapixels`
 
 Takes a `width`/`height` pair — typically straight out of a resolution picker —
 keeps its aspect ratio, and resizes it to a megapixel budget. Two INT outputs,

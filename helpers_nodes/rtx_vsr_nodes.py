@@ -231,9 +231,16 @@ class RTXVideoUpscale:
         return (result, audio)
 
 
+class LegacyRTXVideoUpscale(RTXVideoUpscale):
+    """The pre-CMDR_ node id, so workflows saved with it still resolve."""
+    DEPRECATED = True
+
+
 NODE_CLASS_MAPPINGS = {
-    "Helpers_RTXVideoUpscale": RTXVideoUpscale,
+    "CMDR_RTXVideoUpscale": RTXVideoUpscale,
+    "Helpers_RTXVideoUpscale": LegacyRTXVideoUpscale,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Helpers_RTXVideoUpscale": "RTX Video Upscale (IMAGE) 🧰",
+    "CMDR_RTXVideoUpscale": "RTX Video Upscale (IMAGE) 🧰",
+    "Helpers_RTXVideoUpscale": "RTX Video Upscale (IMAGE) 🧰 (old id)",
 }
