@@ -262,15 +262,25 @@ The loop they close:
 
 ```
 Frame Store Status ──chunks_done──► H3 Chunk Planner ──length, skip_frames──► Load Video
-                                            │
-                                    trim_start, trim_length ──► ImageFromBatch ──► … ──► Save Frame Sequence
-                                            
+        ▲                                   │
+        │                           trim_start, trim_length ──► ImageFromBatch ──► …
+        │                                   │                            │
+        └────── total_frames ───────────────┤                            ▼
+                                            └── total_frames ──► Save Frame Sequence
+                                                 (as stop_at_frames)
+
 [assembly, once every chunk is done]
 Load Images (Path) ──► Video Combine ──Filenames──► Frame Store Prune
 ```
 
 Status reads the folder, so `chunk_index` stops being something you manage by
 hand: queue the workflow M times and each run picks up where the last stopped.
+
+**Wire `total_frames` from the planner into both Status and Save.** Without it
+Status cannot tell a finished job from a partial chunk — see below — and an
+over-long queue appends duplicate frames. If the loop back into Status bothers
+you, feed its `total_frames` from the same `source_frames` / `video_info` the
+planner uses instead; it is the same number.
 
 ## H3 Chunk Planner 🧰
 
@@ -288,8 +298,9 @@ nine math nodes.
 | `clamp_to_trained_range` *(optional)* | keep the length inside H3's trained `[124, 362]` |
 
 Outputs: `length` → `frame_load_cap`, `skip_frames` → `skip_first_frames`,
-`trim_start` / `trim_length` → `ImageFromBatch`, plus `chunk_count`, `is_last`
-and a readable `info`.
+`trim_start` / `trim_length` → `ImageFromBatch`, plus `chunk_count`, `is_last`,
+a readable `info`, and `total_frames` — the count it actually used, which is the
+only way to read the number when it came from `video_info`.
 
 The last chunk's window is pulled back to end exactly on the source's final
 frame, and the overlap that creates is trimmed off the front of what's kept. The
@@ -304,12 +315,27 @@ clamped to the last, and `info` says so.
 `CMDR_FrameStoreStatus`
 
 Reads a frame folder and says where to resume: `frame_count`, `chunks_done`
-(`frame_count // length`, the resume index), `is_clean`, and a `report`.
+(the resume index), `is_clean`, a `report`, and `is_complete`.
+
+**Wire `total_frames`.** The last chunk is shorter than the others — it writes
+`length - overlap` frames — so a finished job is never a whole multiple of
+`length`. Judging by `frame_count // length` alone, a finished 1440-frame job in
+chunks of 158 reads as 9 chunks instead of 10: the loop would redo the last chunk
+on every further run, appending duplicates, and `auto_repair` would delete those
+18 perfectly good frames as if they were a partial chunk. With `total_frames`
+connected, reaching it means done: `chunks_done` becomes the full count,
+`is_complete` goes true, and `auto_repair` will not touch the store.
+
+At `total_frames = 0` the node keeps the older, count-only behaviour, so nothing
+that was wired before changes — but that is the mode with the trap in it.
 
 `verify_integrity` checks each file's end marker (`IEND` for PNG, the RIFF size
 for WebP, `FFD9` for JPEG), so a run interrupted mid-write isn't counted as done.
-`auto_repair` then deletes the incomplete files *and* the tail of a partial
-chunk, to land back on a whole multiple of `length`.
+`auto_repair` then deletes the incomplete files, and the tail of a partial chunk
+to land back on a whole multiple of `length` — but never on a store that already
+reached `total_frames`, and never when there is a hole in the numbering, since
+trimming the tail cannot fill a hole. Frames *past* `total_frames` are reported
+and left alone: deleting them would be guessing which copy is the good one.
 
 `IS_CHANGED` returns `nan` on purpose. Without it ComfyUI would cache the node
 and every run in a queue of ten would read the same `chunks_done` — the resume
@@ -347,6 +373,12 @@ you're writing, and only speaks PNG.
 `format` covers `png`, `webp_lossless`, `webp_q95`, `jpeg_q95`;
 `embed_workflow` is off by default (and PNG-only). `start_index` at `-1`
 continues after the highest index present, which is what a resumable run wants.
+
+`stop_at_frames` is the safety catch: once the folder holds that many frames the
+node writes nothing and returns `written = 0`. Feed it the planner's
+`total_frames` and a queue left running longer than the job wastes GPU time
+instead of corrupting the sequence. It counts the folder anyway to resolve
+`start_index = -1`, so this costs nothing.
 
 Files are numbered on six digits — five would cap at 99 999 frames, about 69
 minutes at 24fps — and written to a `.tmp` then `os.replace`d, so an interrupted

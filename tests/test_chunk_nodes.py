@@ -38,7 +38,7 @@ import torch  # noqa: E402
 
 from COMFYUI_helpers_nodes.helpers_nodes.chunk_nodes import (  # noqa: E402
     FrameStorePrune, FrameStoreStatus, H3ChunkPlanner, SaveFrameSequence,
-    plan_chunk, snap_length)
+    plan_chunk, resolve_progress, snap_length)
 
 PASSED = []
 
@@ -91,18 +91,18 @@ def test_length_grid():
 
 def test_planner_node():
     node = H3ChunkPlanner()
-    length, skip, trim_start, trim_length, count, is_last, info = node.plan(
-        6.0, 24, 3, 1440)
+    (length, skip, trim_start, trim_length, count, is_last, info,
+     total_frames) = node.plan(6.0, 24, 3, 1440)
     assert (length, skip, trim_start, trim_length) == (158, 474, 0, 158)
-    assert count == 10 and is_last is False
+    assert count == 10 and is_last is False and total_frames == 1440
     assert "chunk 3/10" in info and "L=158" in info, info
 
-    *_, is_last, info = node.plan(6.0, 24, 9, 1440)
-    assert is_last is True
+    assert node.plan(6.0, 24, 9, 1440)[5] is True
 
-    # video_info replaces the typed frame count
+    # video_info replaces the typed frame count, and total_frames reports it
     out = node.plan(6.0, 24, 0, 0, video_info={"source_duration": 60.0})
     assert out[4] == math.ceil(1440 / 158), out
+    assert out[7] == 1440, out
 
     # asking past the end is clamped rather than producing a negative length
     plan = node.plan(6.0, 24, 99, 1440)
@@ -150,8 +150,8 @@ def test_status_is_not_cached():
 
 def test_status_missing_directory():
     node = FrameStoreStatus()
-    count, done, clean, report = node.status("never_written", "frame", 8)
-    assert (count, done, clean) == (0, 0, True), (count, done, clean)
+    count, done, clean, report, complete = node.status("never_written", "frame", 8)
+    assert (count, done, clean, complete) == (0, 0, True, False)
     assert "does not exist yet" in report
     check("a missing folder is a starting state, not an error")
 
@@ -161,14 +161,131 @@ def test_status_auto_repair():
     write_frames(store, 21, truncated=(20,))
     node = FrameStoreStatus()
 
-    count, done, clean, report = node.status("status_repair", "frame", 8)
-    assert (count, done, clean) == (20, 2, False), (count, done, clean)
+    count, done, clean, report, complete = node.status("status_repair", "frame", 8)
+    assert (count, done, clean, complete) == (20, 2, False, False)
     assert "incomplete" in report
 
-    count, done, clean, report = node.status("status_repair", "frame", 8, auto_repair=True)
-    assert (count, done, clean) == (16, 2, True), (count, done, clean)
+    count, done, clean, report, complete = node.status("status_repair", "frame", 8,
+                                                       auto_repair=True)
+    assert (count, done, clean, complete) == (16, 2, True, False)
     assert len(os.listdir(store)) == 16, os.listdir(store)
     check("auto_repair drops the truncated file and the partial chunk's tail")
+
+
+# --------------------------------------------------------------------------
+# the completion rule, and what it protects
+# --------------------------------------------------------------------------
+def test_progress_rule():
+    # a finished 1440-frame job in chunks of 158 holds 1440 frames, not 10*158
+    assert resolve_progress(1440, 158, 1440) == (10, True, True)
+    # without the target, the same store reads as unfinished -- this is the
+    # v0.6.0 behaviour, kept for anyone who leaves total_frames at 0
+    assert resolve_progress(1440, 158, 0) == (9, False, False)
+    # mid-series
+    assert resolve_progress(1422, 158, 1440) == (9, False, True)
+    assert resolve_progress(0, 158, 1440) == (0, False, True)
+    # overfilled by an earlier series: complete, but not clean
+    assert resolve_progress(1458, 158, 1440) == (10, True, False)
+    # corruption and holes keep it dirty either side of the rule
+    assert resolve_progress(1440, 158, 1440, has_corrupt=True)[2] is False
+    assert resolve_progress(1422, 158, 1440, has_gaps=True)[2] is False
+    check("progress rule: a short last chunk still counts as a whole chunk")
+
+
+def test_auto_repair_spares_a_finished_store():
+    store = os.path.join(OUTPUT_DIR, "repair_complete")
+    write_frames(store, 1440)
+    node = FrameStoreStatus()
+
+    count, done, clean, report, complete = node.status(
+        "repair_complete", "frame", 158, verify_integrity=False,
+        auto_repair=True, total_frames=1440)
+    assert (count, done, clean, complete) == (1440, 10, True, True)
+    assert len(os.listdir(store)) == 1440, "a complete store must not be touched"
+
+    # and with no target it still trims, which is exactly why total_frames
+    # should always be wired
+    count, done, clean, report, complete = node.status(
+        "repair_complete", "frame", 158, verify_integrity=False, auto_repair=True)
+    assert (count, done, clean, complete) == (1422, 9, True, False)
+    shutil.rmtree(store)
+    check("auto_repair leaves a finished store alone when it knows the target")
+
+
+def test_overfilled_store_is_reported():
+    store = os.path.join(OUTPUT_DIR, "overfilled")
+    write_frames(store, 1458)
+    count, done, clean, report, complete = FrameStoreStatus().status(
+        "overfilled", "frame", 158, verify_integrity=False, total_frames=1440)
+    assert (count, done, complete) == (1458, 10, True)
+    assert clean is False, "duplicates from an earlier series are not clean"
+    assert "18 frame(s) past the target" in report, report
+    shutil.rmtree(store)
+    check("frames past the target are reported, never silently accepted")
+
+
+def run_resume_loop(directory, total, clip_seconds, extra_runs=3, fps=24):
+    """Drive Status -> Planner -> Save until the series is done, then keep going."""
+    planner, status, saver = H3ChunkPlanner(), FrameStoreStatus(), SaveFrameSequence()
+    length = snap_length(clip_seconds, fps)
+    chunk_count = -(-total // length)
+    writes = []
+    for _ in range(chunk_count + extra_runs):
+        _, chunks_done, _, _, _ = status.status(directory, "frame", length,
+                                                verify_integrity=False,
+                                                total_frames=total)
+        plan = planner.plan(clip_seconds, fps, chunks_done, total)
+        trim_length, planned_total = plan[3], plan[7]
+        images = torch.zeros((trim_length, 2, 2, 3))
+        written, _, _ = saver.save(images, directory, "frame", "png", False,
+                                   stop_at_frames=planned_total)
+        writes.append(written)
+    final = status.status(directory, "frame", length, verify_integrity=False,
+                          total_frames=total)
+    return writes, final, chunk_count
+
+
+def test_resume_loop_converges_on_disk():
+    for total, clip_seconds in ((200, 6), (400, 15), (611, 5), (1440, 6), (900, 8)):
+        directory = f"loop_{total}_{clip_seconds}"
+        writes, final, chunk_count = run_resume_loop(directory, total, clip_seconds)
+        count, chunks_done, clean, report, complete = final
+        assert count == total, (total, clip_seconds, count)
+        assert complete is True and clean is True, (total, clip_seconds, report)
+        assert chunks_done == chunk_count, (total, clip_seconds, chunks_done, chunk_count)
+        assert sum(writes) == total, (total, clip_seconds, writes)
+        assert writes[-3:] == [0, 0, 0], (total, clip_seconds, writes)
+        shutil.rmtree(os.path.join(OUTPUT_DIR, directory))
+    check("resume loop on real files: converges to exactly T, extra runs write nothing")
+
+
+def test_resume_loop_matrix():
+    """The same loop over the wide matrix, without touching the disk.
+
+    Writing every frame of 126 combinations would take about ten minutes on
+    Windows, so the file-backed version above covers a handful of shapes and
+    this one covers the arithmetic everywhere, through the same
+    resolve_progress and plan_chunk the nodes call.
+    """
+    combinations = 0
+    for clip_seconds in (5, 6, 7, 8, 10, 15):
+        length = snap_length(clip_seconds, 24)
+        for total in range(200, 3001, 137):
+            if total < length:
+                continue
+            chunk_count = -(-total // length)
+            stored = 0
+            for _ in range(chunk_count + 3):
+                chunks_done, complete, _ = resolve_progress(stored, length, total)
+                plan = plan_chunk(total, length, chunks_done)
+                if stored >= total:          # SaveFrameSequence's stop_at_frames
+                    continue
+                stored += plan["trim_length"]
+            chunks_done, complete, clean = resolve_progress(stored, length, total)
+            assert stored == total, (clip_seconds, total, stored)
+            assert complete and clean and chunks_done == chunk_count
+            combinations += 1
+    check(f"resume loop converges exactly on {combinations} (T, clip_seconds) combinations")
 
 
 # --------------------------------------------------------------------------
@@ -261,8 +378,8 @@ def test_full_cycle_leaves_only_the_video():
     assert (written, next_index) == (6, 12), "a second run must append, not overwrite"
 
     status = FrameStoreStatus()
-    count, done, clean, _ = status.status("cycle", "frame", 6)
-    assert (count, done, clean) == (12, 2, True)
+    count, done, clean, _, complete = status.status("cycle", "frame", 6)
+    assert (count, done, clean, complete) == (12, 2, True, False)
 
     final = os.path.join(OUTPUT_DIR, "FINAL_00001-audio.mp4")
     silent = os.path.join(OUTPUT_DIR, "FINAL_00001.mp4")
@@ -306,6 +423,26 @@ def test_save_formats_and_start_index():
     check("save: every format, atomic writes, start_index and 6-digit numbering")
 
 
+def test_stop_at_frames():
+    node = SaveFrameSequence()
+    images = torch.rand((4, 8, 12, 3))
+    written, next_index, _ = node.save(images, "stop", "frame", "png", False,
+                                       stop_at_frames=10)
+    assert (written, next_index) == (4, 4)
+    written, next_index, _ = node.save(images, "stop", "frame", "png", False,
+                                       stop_at_frames=10)
+    assert (written, next_index) == (4, 8)
+    # the third run would cross the limit, so it writes nothing at all
+    written, next_index, path = node.save(images, "stop", "frame", "png", False,
+                                          stop_at_frames=8)
+    assert (written, next_index) == (0, 8), (written, next_index)
+    assert len(os.listdir(path)) == 8
+    # 0 keeps the old, unlimited behaviour
+    written, _, _ = node.save(images, "stop", "frame", "png", False, stop_at_frames=0)
+    assert written == 4
+    check("stop_at_frames turns a queue that ran too long into a no-op")
+
+
 if __name__ == "__main__":
     print(f"sandbox: {SANDBOX}")
     try:
@@ -315,7 +452,13 @@ if __name__ == "__main__":
         test_status_is_not_cached()
         test_status_missing_directory()
         test_status_auto_repair()
+        test_progress_rule()
+        test_auto_repair_spares_a_finished_store()
+        test_overfilled_store_is_reported()
+        test_resume_loop_matrix()
+        test_resume_loop_converges_on_disk()
         test_save_formats_and_start_index()
+        test_stop_at_frames()
         test_prune_refusals()
         test_prune_path_escape()
         test_prune_intermediates()

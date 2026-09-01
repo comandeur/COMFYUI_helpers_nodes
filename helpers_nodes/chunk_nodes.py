@@ -82,20 +82,26 @@ def frame_index(filename):
 
 
 def list_frame_files(path, prefix):
-    """[(index, filename)] for ``prefix*`` image files, ordered numerically."""
-    if not os.path.isdir(path):
-        return []
+    """[(index, filename)] for ``prefix*`` image files, ordered numerically.
+
+    scandir rather than listdir + isfile: the directory entry already knows
+    whether it is a file, and these folders hold thousands of frames that get
+    listed on every run.
+    """
     found = []
-    for name in os.listdir(path):
-        if not name.startswith(prefix):
-            continue
-        if not name.lower().endswith(IMAGE_EXTENSIONS):
-            continue
-        if not os.path.isfile(os.path.join(path, name)):
-            continue
-        index = frame_index(name)
-        if index is not None:
-            found.append((index, name))
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.startswith(prefix) or not name.lower().endswith(IMAGE_EXTENSIONS):
+                    continue
+                if not entry.is_file():
+                    continue
+                index = frame_index(name)
+                if index is not None:
+                    found.append((index, name))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
     found.sort()
     return found
 
@@ -202,9 +208,9 @@ class H3ChunkPlanner:
 
     CATEGORY = "Helpers 🧰/h3"
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "BOOLEAN", "STRING")
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "BOOLEAN", "STRING", "INT")
     RETURN_NAMES = ("length", "skip_frames", "trim_start", "trim_length",
-                    "chunk_count", "is_last", "info")
+                    "chunk_count", "is_last", "info", "total_frames")
 
     FUNCTION = "plan"
 
@@ -235,16 +241,47 @@ class H3ChunkPlanner:
         if notes:
             info += "\n" + "\n".join(notes)
 
+        # total_frames is appended rather than inserted, so existing wiring holds.
+        # It is the only place the count resolved from video_info can be read.
         return (plan["length"], plan["skip_frames"], plan["trim_start"], plan["trim_length"],
-                plan["chunk_count"], plan["is_last"], info)
+                plan["chunk_count"], plan["is_last"], info, int(source_frames))
 
 
 # --------------------------------------------------------------------------
 # B. frame store status
 # --------------------------------------------------------------------------
 
-def read_frame_store(path, prefix, length, verify_integrity=True, auto_repair=False):
-    """Inspect a frame folder and work out where to resume."""
+def resolve_progress(frame_count, length, total_frames=0, has_corrupt=False, has_gaps=False):
+    """(chunks_done, is_complete, is_clean) from what is on disk.
+
+    Split out of ``read_frame_store`` because this is the rule the resume loop
+    turns on, and it can then be checked over a wide matrix without writing a
+    single file.
+    """
+    total_frames = max(0, int(total_frames))
+    if total_frames > 0 and frame_count >= total_frames:
+        # the last chunk is shorter than the others, so a finished job is never
+        # a whole multiple of length: only the target tells us it is done
+        chunks_done = -(-total_frames // length)  # ceil
+        is_clean = frame_count == total_frames and not has_corrupt and not has_gaps
+        return chunks_done, True, is_clean
+    chunks_done = frame_count // length
+    is_clean = frame_count % length == 0 and not has_corrupt and not has_gaps
+    return chunks_done, False, is_clean
+
+
+def read_frame_store(path, prefix, length, verify_integrity=True, auto_repair=False,
+                     total_frames=0):
+    """Inspect a frame folder and work out where to resume.
+
+    ``total_frames`` is what makes a finished job recognisable. Without it the
+    only measure available is ``frame_count // length``, and that under-reports
+    at the end: the last chunk writes ``length - overlap`` frames, not
+    ``length``. A finished 1440-frame job in chunks of 158 reads as 9 chunks
+    instead of 10, so the resume loop would redo the last chunk forever -- and
+    auto_repair would delete its 18 perfectly good frames, taking them for a
+    partial chunk.
+    """
     entries = list_frame_files(path, prefix)
     corrupt, valid = [], []
     for index, name in entries:
@@ -264,11 +301,14 @@ def read_frame_store(path, prefix, length, verify_integrity=True, auto_repair=Fa
                 pass
         corrupt = []
 
-    # a gap means a frame went missing in the middle; the run is not clean and
-    # only the contiguous head can be trusted as "done"
+    # a gap means a frame went missing in the middle; the run is not clean, and
+    # trimming the tail cannot fill a hole, so repair leaves the rest alone
     gaps = [b[0] for a, b in zip(valid, valid[1:]) if b[0] != a[0] + 1]
 
-    if auto_repair and valid and len(valid) % length != 0:
+    total_frames = max(0, int(total_frames))
+    complete = total_frames > 0 and len(valid) >= total_frames
+
+    if auto_repair and not complete and not gaps and valid and len(valid) % length != 0:
         keep = (len(valid) // length) * length
         for index, name in valid[keep:]:
             try:
@@ -279,29 +319,41 @@ def read_frame_store(path, prefix, length, verify_integrity=True, auto_repair=Fa
         valid = valid[:keep]
 
     frame_count = len(valid)
-    chunks_done = frame_count // length
-    is_clean = frame_count % length == 0 and not corrupt and not gaps
+    chunks_done, is_complete, is_clean = resolve_progress(
+        frame_count, length, total_frames, bool(corrupt), bool(gaps))
 
-    report = [f"{frame_count} frames in {path or '(missing)'}",
-              f"chunks_done = {frame_count} // {length} = {chunks_done}"]
+    report = [f"{frame_count} frames in {path or '(missing)'}"]
+    if total_frames > 0:
+        report.append(f"target {total_frames} frames -> "
+                      + ("complete" if is_complete
+                         else f"{total_frames - frame_count} to go"))
+    report.append(f"chunks_done = {chunks_done}")
     if corrupt:
         report.append(f"{len(corrupt)} incomplete file(s): "
                       + ", ".join(name for _, name in corrupt[:5])
                       + (" ..." if len(corrupt) > 5 else ""))
     if gaps:
-        report.append(f"gap(s) in the numbering before index {gaps[:5]}")
+        report.append(f"gap(s) in the numbering before index {gaps[:5]}"
+                      + (" -- auto_repair leaves those alone, trimming the tail "
+                         "cannot fill a hole" if auto_repair else ""))
     if removed:
         report.append(f"auto_repair removed {len(removed)} file(s)")
-    if frame_count % length:
+    if total_frames > 0 and frame_count > total_frames:
+        report.append(f"{frame_count - total_frames} frame(s) past the target: an "
+                      "earlier series wrote duplicates. They are reported, never "
+                      "deleted automatically.")
+    elif not is_complete and frame_count % length:
         report.append(f"{frame_count % length} frame(s) past the last whole chunk"
                       + ("" if auto_repair else " (auto_repair would drop them)"))
     if is_clean:
-        report.append("clean: resume at chunk " + str(chunks_done))
+        report.append("clean: " + ("nothing left to do" if is_complete
+                                   else f"resume at chunk {chunks_done}"))
 
     return {
         "frame_count": frame_count,
         "chunks_done": chunks_done,
         "is_clean": is_clean,
+        "is_complete": is_complete,
         "report": "\n".join(report),
     }
 
@@ -327,32 +379,39 @@ class FrameStoreStatus:
                 "auto_repair": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Delete incomplete files and the tail of a partial chunk, to "
-                               "land back on a whole multiple of length.",
+                               "land back on a whole multiple of length. Never touches a "
+                               "store that already reached total_frames.",
+                }),
+                "total_frames": ("INT", {
+                    "default": 0, "min": 0, "max": 10 ** 7,
+                    "tooltip": "Frames the finished job should hold. At 0 the node cannot "
+                               "tell a finished series from a partial chunk, because the "
+                               "last chunk is shorter than the others -- feed it the "
+                               "planner's total_frames.",
                 }),
             },
         }
 
     CATEGORY = "Helpers 🧰/io"
 
-    RETURN_TYPES = ("INT", "INT", "BOOLEAN", "STRING")
-    RETURN_NAMES = ("frame_count", "chunks_done", "is_clean", "report")
+    RETURN_TYPES = ("INT", "INT", "BOOLEAN", "STRING", "BOOLEAN")
+    RETURN_NAMES = ("frame_count", "chunks_done", "is_clean", "report", "is_complete")
 
     FUNCTION = "status"
 
     DESCRIPTION = ("Read a frame folder and say which chunk comes next, so a queued run "
                    "resumes on its own.")
 
-    def status(self, directory, prefix, length, verify_integrity=True, auto_repair=False):
-        try:
-            path = resolve_store_directory(directory)
-        except ValueError as e:
-            raise ValueError(str(e)) from e
+    def status(self, directory, prefix, length, verify_integrity=True, auto_repair=False,
+               total_frames=0):
+        path = resolve_store_directory(directory)
         if not os.path.isdir(path):
             # nothing written yet is a normal starting state, not an error
-            return (0, 0, True, f"{path} does not exist yet: starting at chunk 0")
-        result = read_frame_store(path, prefix, length, verify_integrity, auto_repair)
-        return (result["frame_count"], result["chunks_done"],
-                result["is_clean"], result["report"])
+            return (0, 0, True, f"{path} does not exist yet: starting at chunk 0", False)
+        result = read_frame_store(path, prefix, length, verify_integrity, auto_repair,
+                                  total_frames)
+        return (result["frame_count"], result["chunks_done"], result["is_clean"],
+                result["report"], result["is_complete"])
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
@@ -556,6 +615,12 @@ class SaveFrameSequence:
                                         "tooltip": "-1 continues after the highest index already "
                                                    "in the folder, which is what a resumable run "
                                                    "wants. Otherwise writes from this index."}),
+                "stop_at_frames": ("INT", {
+                    "default": 0, "min": 0, "max": 10 ** 7,
+                    "tooltip": "Write nothing once the folder holds this many frames. 0 = no "
+                               "limit. Feed it the planner's total_frames, and a queue left "
+                               "running too long wastes GPU instead of duplicating frames.",
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -575,8 +640,17 @@ class SaveFrameSequence:
                    "already there. Atomic writes, no workflow embedded by default.")
 
     def save(self, images, directory, prefix, format, embed_workflow,
-             start_index=-1, prompt=None, extra_pnginfo=None):
+             start_index=-1, stop_at_frames=0, prompt=None, extra_pnginfo=None):
         path = resolve_store_directory(directory)
+
+        if stop_at_frames > 0:
+            present = len(list_frame_files(path, prefix))
+            if present >= stop_at_frames:
+                # the series is already complete: an extra queued run must not
+                # append a second copy of the last chunk
+                print(f"[CMDR_SaveFrameSequence] {path} already holds {present} frames "
+                      f"(stop_at_frames={stop_at_frames}): nothing written.")
+                return (0, next_free_index(path, prefix), path)
 
         metadata = None
         if embed_workflow:
