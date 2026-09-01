@@ -1,7 +1,7 @@
 [project]
 name = "comandeur-helpers-nodes"
 description = "A small pack of ComfyUI helper nodes."
-version = "0.6.0"
+version = "0.7.0"
 requires-python = ">=3.9"
 dependencies = ["Pillow", "numpy"]
 

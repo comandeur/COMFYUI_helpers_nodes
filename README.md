@@ -219,6 +219,36 @@ count only as a tie-break. So the megapixel value is a target, not a hard
 ceiling: expect the result to land within a few percent of it, and closer as
 `multiple` gets smaller.
 
+`megapixel_base` (optional) says how many pixels one megapixel is worth:
+`1,000,000` by default, or `1024x1024` (1 048 576) to match ComfyUI's built-in
+Resolution Selector, which counts that way — a 4.9% bigger area for the same
+number.
+
+---
+
+## Resolution Selector 🧰
+
+`CMDR_ResolutionSelector`
+
+The same maths driven by a preset instead of a width/height pair: pick an aspect
+ratio and a megapixel budget, get `width` and `height`.
+
+A more precise replacement for ComfyUI's built-in *Resolution Selector*:
+
+* `megapixels` moves in steps of **0.01** instead of 0.1, and starts at 0.01
+  instead of 0.1;
+* two presets the built-in doesn't have — **9:21 (Portrait Ultrawide)** and the
+  **5:6 / 6:5** near-square pair — for eleven in total, core's eight included and
+  spelled identically;
+* the ratio survives the rounding. Core rounds each side to its own nearest
+  multiple, which drifts: 16:9 at 0.9 MP on a multiple of 32 gives 1280x736, a
+  ratio of 1.739 — 2.2% off. This node gives 1312x736, i.e. 1.783, 0.27% off;
+* presets are ordered square-first then outward, so the pairs read in order.
+
+Set `megapixel_base` to `1024x1024` for a drop-in swap: the target area is then
+core's, and only the rounding differs — never in the ratio's disfavour, which the
+tests check across every preset, budget and multiple.
+
 ---
 
 # Chunked long-video pipeline
