@@ -218,3 +218,116 @@ four floor/ceil combinations instead and picks the closest ratio, using the pixe
 count only as a tie-break. So the megapixel value is a target, not a hard
 ceiling: expect the result to land within a few percent of it, and closer as
 `multiple` gets smaller.
+
+---
+
+# Chunked long-video pipeline
+
+Four nodes for processing a long source a clip at a time, across several runs,
+with the frames living in an output folder in between. Written for MiniMax H3
+inpainting; nothing is H3-specific except the length grid. They live under
+**Helpers 🧰/h3** and **Helpers 🧰/io**.
+
+The loop they close:
+
+```
+Frame Store Status ──chunks_done──► H3 Chunk Planner ──length, skip_frames──► Load Video
+                                            │
+                                    trim_start, trim_length ──► ImageFromBatch ──► … ──► Save Frame Sequence
+                                            
+[assembly, once every chunk is done]
+Load Images (Path) ──► Video Combine ──Filenames──► Frame Store Prune
+```
+
+Status reads the folder, so `chunk_index` stops being something you manage by
+hand: queue the workflow M times and each run picks up where the last stopped.
+
+## H3 Chunk Planner 🧰
+
+`CMDR_H3ChunkPlanner`
+
+Turns a wanted clip duration into the exact windows to load. Replaces a chain of
+nine math nodes.
+
+| widget | meaning |
+| --- | --- |
+| `clip_seconds` / `fps` | wanted duration; the real length is rounded **up** onto H3's `17k+5` grid |
+| `chunk_index` | which chunk to plan — feed it `chunks_done` from Frame Store Status |
+| `source_frames` | total frames of the source, ignored when `video_info` is connected |
+| `video_info` *(optional)* | a `VHS_VIDEOINFO`: the count becomes `source_duration × fps` |
+| `clamp_to_trained_range` *(optional)* | keep the length inside H3's trained `[124, 362]` |
+
+Outputs: `length` → `frame_load_cap`, `skip_frames` → `skip_first_frames`,
+`trim_start` / `trim_length` → `ImageFromBatch`, plus `chunk_count`, `is_last`
+and a readable `info`.
+
+The last chunk's window is pulled back to end exactly on the source's final
+frame, and the overlap that creates is trimmed off the front of what's kept. The
+guarantee, checked over 16752 combinations in the tests: concatenating the kept
+ranges for `k` in `0..M-1` reproduces `range(T)` exactly — no gap, no duplicate
+frame. Asking for a `clip_seconds` longer than the source is an error rather
+than a silently off-grid frame count; asking for a chunk past the last one is
+clamped to the last, and `info` says so.
+
+## Frame Store Status 🧰
+
+`CMDR_FrameStoreStatus`
+
+Reads a frame folder and says where to resume: `frame_count`, `chunks_done`
+(`frame_count // length`, the resume index), `is_clean`, and a `report`.
+
+`verify_integrity` checks each file's end marker (`IEND` for PNG, the RIFF size
+for WebP, `FFD9` for JPEG), so a run interrupted mid-write isn't counted as done.
+`auto_repair` then deletes the incomplete files *and* the tail of a partial
+chunk, to land back on a whole multiple of `length`.
+
+`IS_CHANGED` returns `nan` on purpose. Without it ComfyUI would cache the node
+and every run in a queue of ten would read the same `chunks_done` — the resume
+would stop advancing. A missing folder is a starting state, not an error.
+
+## Frame Store Prune 🧰
+
+`CMDR_FrameStorePrune`
+
+Deletes the working frames once the final video exists. `mode` defaults to
+`disabled`, so a shared workflow never deletes anything by surprise.
+
+In `after_assembly` mode the `filenames` input (the final Video Combine's
+`Filenames`) is mandatory: it is what makes the assembly run *before* this node —
+ComfyUI has no notion of "after", only data dependencies — and what proves the
+video was written. Nothing is deleted unless that file exists and is non-empty,
+and unless `expected_frames` (feed it `frame_count`) matches exactly.
+
+`prune_video_intermediates` also removes what Video Combine leaves beside the
+muxed result: `VHS_FILENAMES` is `(save_output, [paths…])` whose **last** entry
+is the real file and whose earlier entries are intermediates — the silent `.mp4`
+of an audio mux, the metadata png. Every path is checked to be inside `output/`
+or `temp/` before removal, files are deleted one by one filtered on `prefix`
+(never `rmtree`), and the folder itself goes only if it ends up empty.
+
+## Save Frame Sequence 🧰
+
+`CMDR_SaveFrameSequence`
+
+Writes an `IMAGE` batch as numbered stills, appending to whatever is already
+there. Replaces `SaveImage` for inter-run storage: `SaveImage` embeds the whole
+workflow JSON in *every* file, which over a few thousand frames is most of what
+you're writing, and only speaks PNG.
+
+`format` covers `png`, `webp_lossless`, `webp_q95`, `jpeg_q95`;
+`embed_workflow` is off by default (and PNG-only). `start_index` at `-1`
+continues after the highest index present, which is what a resumable run wants.
+
+Files are numbered on six digits — five would cap at 99 999 frames, about 69
+minutes at 24fps — and written to a `.tmp` then `os.replace`d, so an interrupted
+run leaves a stray temp file rather than a truncated frame.
+
+## Tests
+
+```bash
+python_embeded/python.exe custom_nodes/COMFYUI_helpers_nodes/tests/test_chunk_nodes.py
+```
+
+Runs without starting ComfyUI: `folder_paths` is stubbed onto a throwaway
+directory, so the file-touching nodes are exercised for real without going near
+your `output/`.
