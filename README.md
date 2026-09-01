@@ -148,6 +148,51 @@ but h264/h265 need even dimensions — so the default rounds to even. Use
 `multiple of 8` if the result goes back through a VAE, or `exact` to keep the
 aspect ratio exactly.
 
+### Memory
+
+An `IMAGE` output has to exist as one contiguous tensor — that is the socket's
+contract, not a choice this node makes. 1000 frames of 1280x704 in float32 is
+10.5 GiB of RAM, held alongside the input batch, and any IMAGE-based path pays
+it: *Load Video → anything → Video Combine* costs the same. When it doesn't fit:
+
+* run the graph through a VHS **Meta Batch Manager**, so only `frames_per_batch`
+  frames exist at a time. This node is stateless across batches and keeps its
+  engine loaded between them, so it costs nothing to use that way;
+* set `output_dtype` to `float16`, which halves the figure;
+* or use **RTX Video Upscale (to file)** below, which never allocates it at all.
+
+---
+
+## RTX Video Upscale (to file) 🧰
+
+`CMDR_RTXVideoUpscaleToFile`
+
+The same upscale, encoded straight to a video file instead of an `IMAGE` batch.
+Each frame is handed to the encoder and dropped, so the run costs one frame of
+RAM no matter how long the video is. The result plays in a preview on the node.
+
+Encoding goes through PyAV, which already ships with ComfyUI — no ffmpeg binary
+on PATH, no subprocess pipe.
+
+| widget | meaning |
+| --- | --- |
+| `images` | the frames to upscale |
+| `quality` / `scale` / `custom_width` / `custom_height` / `align` | identical to the IMAGE node |
+| `frame_rate` | fps written to the file — feed it from the loader's `video_info` to keep the original timing |
+| `filename_prefix` | path under `output/`, supports ComfyUI's `%date:yyyy-MM-dd%` tokens |
+| `format` | `mp4` or `avi`, both h264 so `crf` keeps its meaning |
+| `crf` | 0 lossless, 18 visually lossless, 23 default, 51 worst |
+| `save_output` | on: written to `output/`. off: written to `temp/`, so it still plays in the preview but isn't kept |
+| `save_metadata` | embed the prompt and workflow in the file |
+| `audio` *(optional)* | muxed in (AAC in mp4, MP3 in avi); leave unconnected for a silent file |
+
+Output: the full path as a `STRING`.
+
+Metadata is written the same way ComfyUI's own save nodes write it — the prompt
+and the workflow as JSON tags, so dropping the file back into ComfyUI restores
+the graph. That works reliably in mp4 (the muxer is told to keep custom tags);
+avi's tag support is poor, so treat it as best-effort there.
+
 ---
 
 ## Scale Resolution to Megapixels 🧰
