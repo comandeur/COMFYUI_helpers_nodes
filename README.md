@@ -72,3 +72,67 @@ the "as fast as possible" delays most GIF encoders write.
 Alpha is composited by Pillow with the GIF disposal method / WebP blending
 applied, so transparent frames come out looking like they do in a viewer instead
 of leaving trails.
+
+---
+
+## RTX Video Upscale (IMAGE) 🧰
+
+`Helpers_RTXVideoUpscale`
+
+NVIDIA RTX Video Super Resolution applied to an `IMAGE` batch, in place in the
+workflow: **IMAGE + AUDIO in, upscaled IMAGE + the same AUDIO out.** No video
+file, no ffmpeg round trip, nothing written to disk.
+
+[ComfyUI-RTX-Video-Suite](https://github.com/uczensokratesa/ComfyUI-RTX-Video-Suite)
+wraps the same SDK, but around files: it reads a video off disk and writes an
+upscaled one back, which means leaving the graph and re-encoding every time.
+This node keeps the model parameters on the node and everything else in the
+workflow, so it can sit between any two video nodes.
+
+### Requirements
+
+* an NVIDIA RTX GPU
+* the NVIDIA Video Effects (VFX) SDK — an importable `nvvfx` in the python
+  environment ComfyUI runs on
+
+Without the SDK the node still loads; it raises a readable error when executed.
+
+### Inputs
+
+| widget | meaning |
+| --- | --- |
+| `images` | the frames to upscale |
+| `quality` | the full SDK quality list, read from the installed `nvvfx` |
+| `scale` | output multiplier, used when both custom dimensions are `0` |
+| `custom_width` / `custom_height` | explicit output size; `0` = derive from `scale`, set one to scale by aspect |
+| `audio` *(optional)* | passed straight through, untouched |
+| `align` *(optional)* | `even` (default), `exact`, or `multiple of 8` |
+| `keep_model_loaded` *(optional)* | keep the inference engine in VRAM between runs (default on) |
+
+### Quality levels
+
+The list comes from the SDK itself, so it covers more than upscaling:
+
+* `BICUBIC`, `LOW`…`ULTRA` — standard upscaling, also removes compression
+  artifacts
+* `HIGHBITRATE_LOW`…`HIGHBITRATE_ULTRA` — upscaling for clean/lossless sources,
+  skips artifact suppression so it doesn't soften detail that's already good
+* `DENOISE_*` and `DEBLUR_*` — enhancement at source resolution. `scale` and the
+  custom dimensions are ignored for these, since the SDK requires output size to
+  equal input size.
+
+### Notes
+
+Frames are handed to the SDK one at a time on the GPU over DLPack, so VRAM cost
+is one input frame plus one output frame no matter how long the batch is — the
+batch itself still lives in RAM, as any `IMAGE` does.
+
+The inference engine is loaded once and cached across executions (a first run
+costs about a second, later runs are instant). Quality and output size can be
+changed without reloading it. Turn `keep_model_loaded` off to release it after
+each run.
+
+`align` exists because the SDK accepts any output size, including odd numbers,
+but h264/h265 need even dimensions — so the default rounds to even. Use
+`multiple of 8` if the result goes back through a VAE, or `exact` to keep the
+aspect ratio exactly.
