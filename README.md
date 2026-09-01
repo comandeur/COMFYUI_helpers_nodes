@@ -136,3 +136,29 @@ each run.
 but h264/h265 need even dimensions — so the default rounds to even. Use
 `multiple of 8` if the result goes back through a VAE, or `exact` to keep the
 aspect ratio exactly.
+
+---
+
+## Scale Resolution to Megapixels 🧰
+
+`Helpers_ScaleResolutionToMegapixels`
+
+Takes a `width`/`height` pair — typically straight out of a resolution picker —
+keeps its aspect ratio, and resizes it to a megapixel budget. Two INT outputs,
+`width` and `height`, ready to feed an empty latent or a resize node.
+
+| widget | meaning |
+| --- | --- |
+| `width` / `height` | the resolution whose ratio you want to keep; connect them or type them |
+| `megapixels` | pixel budget for the result (`1.0` = one million pixels) |
+| `multiple` | snap both dimensions to a multiple of this (default `32`) |
+
+The ratio is read from the two numbers exactly as they arrive, so if they were
+already snapped by the picker, that snapped ratio is what gets preserved.
+
+Rounding each side to its own nearest multiple lets the ratio drift — 1920x1080
+at 0.5 MP on a multiple of 32 lands on 1.71 instead of 1.78. This node scores all
+four floor/ceil combinations instead and picks the closest ratio, using the pixel
+count only as a tie-break. So the megapixel value is a target, not a hard
+ceiling: expect the result to land within a few percent of it, and closer as
+`multiple` gets smaller.
