@@ -99,6 +99,9 @@ class ScaleResolutionToMegapixels:
                                                 "ratio accuracy for model-friendly sizes."}),
             },
             "optional": {
+                "upscale_factor": ([2, 4], {"default": 2,
+                    "tooltip": "Match FlashVSR's scale (2 or 4). Megapixels targets the FINAL output. "
+                               "Connect resize_factor to FlashVSR's resize_factor."}),
                 "megapixel_base": (list(MEGAPIXEL_BASES), {"default": "1,000,000",
                                                            "tooltip": MEGAPIXEL_BASE_TOOLTIP}),
             },
@@ -106,16 +109,29 @@ class ScaleResolutionToMegapixels:
 
     CATEGORY = "Helpers 🧰"
 
-    RETURN_TYPES = ("INT", "INT")
-    RETURN_NAMES = ("width", "height")
+    RETURN_TYPES = ("INT", "INT", "FLOAT")
+    RETURN_NAMES = ("width", "height", "resize_factor")
 
     FUNCTION = "scale"
 
     DESCRIPTION = ("Keep the aspect ratio of a width/height pair, resize it to a "
-                   "megapixel budget, snapped to a multiple.")
+                   "megapixel budget, snapped to a multiple. resize_factor is the "
+                   "input reduction needed for the FINAL MP after FlashVSR's x2/x4 upscale. "
+                   "Match upscale_factor to FlashVSR scale. Dimension outputs are aligned "
+                   "final targets; FlashVSR's own rounding may differ. A resize_factor "
+                   "above 1 means the target exceeds this FlashVSR scale's capacity.")
 
-    def scale(self, width, height, megapixels, multiple, megapixel_base="1,000,000"):
-        return scale_to_megapixels(width, height, megapixels, multiple, megapixel_base)
+    def scale(self, width, height, megapixels, multiple, megapixel_base="1,000,000",
+              upscale_factor=2):
+        if not math.isfinite(megapixels) or megapixels <= 0:
+            raise ValueError("megapixels must be finite and positive")
+        if upscale_factor not in (2, 4):
+            raise ValueError("upscale_factor must match FlashVSR scale: 2 or 4")
+        new_width, new_height = scale_to_megapixels(
+            width, height, megapixels, multiple, megapixel_base)
+        resize_factor = math.sqrt(
+            megapixels * MEGAPIXEL_BASES[megapixel_base] / (width * height)) / upscale_factor
+        return new_width, new_height, resize_factor
 
 
 class ResolutionSelector:

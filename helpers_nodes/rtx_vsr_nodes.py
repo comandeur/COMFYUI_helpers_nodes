@@ -4,7 +4,7 @@ ComfyUI-RTX-Video-Suite wraps the same SDK but works on files: it reads a video
 off disk and writes an upscaled one back. That means leaving the workflow,
 re-encoding, and a round trip through ffmpeg every time.
 
-Two nodes here, sharing one upscale loop and one cached inference engine:
+Two upscale nodes share one upscale loop and one cached inference engine:
 
 * ``RTXVideoUpscale`` -- IMAGE in, IMAGE out, AUDIO carried through untouched.
   Stays in the graph, at the cost of the upscaled batch existing as one tensor.
@@ -16,8 +16,11 @@ input frame plus one output frame regardless of how long the batch is.
 
 Requires the NVIDIA Video Effects (VFX) SDK, i.e. an importable ``nvvfx``, and an
 RTX GPU. Without it the nodes still register and only fail when executed.
+Additional same-resolution nodes provide artifact cleanup, human segmentation
+and background blur. The latter two use the native SDK via rtx_vfx_native.
 """
 import os
+import threading
 
 import torch
 
@@ -399,12 +402,209 @@ class LegacyRTXVideoUpscale(RTXVideoUpscale):
     DEPRECATED = True
 
 
+ARTIFACT_STRENGTHS = {
+    "LOW": "DENOISE_LOW", "MED": "DENOISE_MEDIUM",
+    "HIGH": "DENOISE_HIGH", "ULTRA": "DENOISE_ULTRA",
+}
+GREEN_SCREEN_MODES = {
+    "QUALITY (chairs foreground)": 0,
+    "PERFORMANCE (chairs foreground)": 1,
+    "QUALITY (chairs background)": 2,
+    "PERFORMANCE (chairs background)": 3,
+}
+
+# Separate from the existing upscaler: cleanup cannot change its cached settings.
+_ARTIFACT_SESSION = _VSRSession()
+_VFX_LOCK = threading.RLock()
+_NATIVE_SESSIONS = {}
+
+
+def get_artifact_strengths():
+    try:
+        available = {q.name for q in get_quality_enum()}
+    except Exception:
+        return list(ARTIFACT_STRENGTHS)
+    return [s for s, q in ARTIFACT_STRENGTHS.items() if q in available]
+
+
+def validate_vfx_images(images):
+    if (images is None or images.ndim != 4 or any(d == 0 for d in images.shape)
+            or images.shape[-1] not in (3, 4)):
+        raise ValueError("Expected a non-empty IMAGE batch [N, H, W, 3 or 4]")
+    return images[..., :3]
+
+
+def vfx_device():
+    device = model_management.get_torch_device()
+    if device.type != "cuda":
+        raise RuntimeError(f"RTX VFX requires CUDA; ComfyUI is using {device}.")
+    return torch.device("cuda", device.index if device.index is not None
+                        else torch.cuda.current_device())
+
+
+def validate_vfx_mask(mask, images):
+    if mask is None or mask.ndim not in (2, 3):
+        raise ValueError("Expected MASK [H, W] or [N, H, W]")
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    if tuple(mask.shape[1:]) != tuple(images.shape[1:3]):
+        raise ValueError("MASK dimensions must match IMAGE dimensions (no automatic resize)")
+    if mask.shape[0] not in (1, images.shape[0]):
+        raise ValueError("Provide one mask to broadcast, or exactly one mask per image")
+    return mask
+
+
+def process_vfx(images, kind, setting, output_dtype, keep_loaded, mask=None, temporal=True):
+    images = validate_vfx_images(images)
+    count, height, width, _ = images.shape
+    dtype = OUTPUT_DTYPES[output_dtype]
+    if kind == "GreenScreen" and (width < 512 or height < 288):
+        raise ValueError("NVIDIA AI Green Screen requires at least 512x288; input is not resized")
+    if kind == "BackgroundBlur":
+        mask = validate_vfx_mask(mask, images)
+    device = vfx_device()
+    # Serialise mutable SDK engines across node instances and queued executions.
+    with _VFX_LOCK, torch.cuda.device(device):
+        if kind == "Artifact":
+            session = _ARTIFACT_SESSION
+        else:
+            from .rtx_vfx_native import NativeSession
+            session = _NATIVE_SESSIONS.setdefault(kind, NativeSession(kind))
+        failed = True
+        try:
+            output = allocate_output(count, height, width, dtype)
+            masks = (torch.empty((count, height, width), dtype=torch.float32)
+                     if kind == "GreenScreen" else None)
+            if kind == "Artifact":
+                try:
+                    effect = session.get(setting, width, height, device.index)
+                except KeyError as exc:
+                    raise RuntimeError(f"Installed nvvfx lacks {setting}; update nvidia-vfx "
+                                       "to use same-resolution artifact reduction.") from exc
+            else:
+                effect = session.get(device, height, width, setting)
+                effect.bind_stream()
+                effect.reset()
+            pbar = ProgressBar(count)
+            for i in range(count):
+                model_management.throw_exception_if_processing_interrupted()
+                frame = images[i].to(device=device, dtype=torch.float32).clamp(0, 1)
+                if kind == "Artifact":
+                    source = frame.permute(2, 0, 1).contiguous()
+                    result = effect.run(source, stream_ptr=torch.cuda.current_stream(device).cuda_stream)
+                    processed = torch.from_dlpack(result.image).clone().permute(1, 2, 0)
+                elif kind == "GreenScreen":
+                    if not temporal and i:
+                        effect.reset()
+                    alpha = effect.run(frame)
+                    if tuple(alpha.shape) != (height, width):
+                        raise RuntimeError("NVIDIA VFX returned a mask with unexpected dimensions")
+                    masks[i].copy_(alpha.cpu())
+                    processed = frame * alpha.unsqueeze(-1)
+                else:
+                    alpha = mask[0 if mask.shape[0] == 1 else i].to(device=device, dtype=torch.float32)
+                    processed = effect.run(frame, alpha)
+                if tuple(processed.shape) != (height, width, 3):
+                    raise RuntimeError("NVIDIA VFX changed image dimensions; refusing resized output")
+                output[i].copy_(processed.clamp(0, 1).to(dtype).cpu())
+                pbar.update(1)
+            failed = False
+            return (output, masks) if masks is not None else output
+        finally:
+            try:
+                if failed or not keep_loaded:
+                    session.close()
+            finally:
+                model_management.soft_empty_cache()
+
+
+def vfx_common_inputs():
+    return {
+        "output_dtype": (list(OUTPUT_DTYPES), {"default": "float16"}),
+        "keep_loaded": ("BOOLEAN", {"default": True}),
+    }
+
+
+class RTXArtifactReduction:
+    @classmethod
+    def INPUT_TYPES(cls):
+        strengths = get_artifact_strengths() or list(ARTIFACT_STRENGTHS)
+        return {"required": {
+            "images": ("IMAGE",),
+            "strength": (strengths, {"default": "LOW" if "LOW" in strengths else strengths[0]}),
+            **vfx_common_inputs(),
+        }, "optional": {"audio": ("AUDIO",)}}
+
+    CATEGORY = "Helpers 🧰"
+    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_NAMES = ("images", "audio")
+    FUNCTION = "reduce"
+    DESCRIPTION = ("Same-resolution NVIDIA DENOISE artifact cleanup. Never scales or aligns "
+                   "dimensions. Audio passes through unchanged.")
+
+    def reduce(self, images, strength="LOW", output_dtype="float16", keep_loaded=True, audio=None):
+        result = process_vfx(images, "Artifact", ARTIFACT_STRENGTHS[strength], output_dtype, keep_loaded)
+        return result, audio
+
+
+class RTXAIGreenScreen:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",),
+            "mode": (list(GREEN_SCREEN_MODES), {"default": "QUALITY (chairs foreground)"}),
+            "temporal": ("BOOLEAN", {"default": True, "tooltip":
+                "On for ordered video frames; off for independent images. State resets each execution."}),
+            **vfx_common_inputs(),
+        }}
+
+    CATEGORY = "Helpers 🧰"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("foreground", "mask")
+    FUNCTION = "segment"
+    DESCRIPTION = ("NVIDIA human segmentation. Foreground is RGB over black; the soft MASK "
+                   "is white for foreground, black for background. Minimum input: 512x288.")
+
+    def segment(self, images, mode="QUALITY (chairs foreground)", temporal=True,
+                output_dtype="float16", keep_loaded=True):
+        return process_vfx(images, "GreenScreen", GREEN_SCREEN_MODES[mode],
+                           output_dtype, keep_loaded, temporal=temporal)
+
+
+class RTXBackgroundBlur:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",),
+            "mask": ("MASK", {"tooltip": "White protects foreground; black blurs background."}),
+            "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            **vfx_common_inputs(),
+        }}
+
+    CATEGORY = "Helpers 🧰"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "blur"
+    DESCRIPTION = "NVIDIA background blur. Connect the original IMAGE and foreground MASK."
+
+    def blur(self, images, mask, strength=0.5, output_dtype="float16", keep_loaded=True):
+        if not 0.0 <= strength <= 1.0:
+            raise ValueError("Blur strength must be between 0 and 1")
+        return (process_vfx(images, "BackgroundBlur", strength, output_dtype, keep_loaded, mask=mask),)
+
+
 NODE_CLASS_MAPPINGS = {
+    "CMDR_RTXArtifactReduction": RTXArtifactReduction,
+    "CMDR_RTXAIGreenScreen": RTXAIGreenScreen,
+    "CMDR_RTXBackgroundBlur": RTXBackgroundBlur,
     "CMDR_RTXVideoUpscale": RTXVideoUpscale,
     "CMDR_RTXVideoUpscaleToFile": RTXVideoUpscaleToFile,
     "Helpers_RTXVideoUpscale": LegacyRTXVideoUpscale,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "CMDR_RTXArtifactReduction": "RTX Artifact Reduction",
+    "CMDR_RTXAIGreenScreen": "RTX AI Green Screen",
+    "CMDR_RTXBackgroundBlur": "RTX Background Blur",
     "CMDR_RTXVideoUpscale": "RTX Video Upscale (IMAGE) 🧰",
     "CMDR_RTXVideoUpscaleToFile": "RTX Video Upscale (to file) 🧰",
     "Helpers_RTXVideoUpscale": "RTX Video Upscale (IMAGE) 🧰 (old id)",

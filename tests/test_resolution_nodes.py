@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import types
+import importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.dirname(HERE)
@@ -13,9 +14,15 @@ CUSTOM_NODES = os.path.dirname(PACK)
 sys.path.insert(0, CUSTOM_NODES)
 sys.modules.setdefault("nodes", types.ModuleType("nodes"))
 
-from COMFYUI_helpers_nodes.helpers_nodes.resolution_nodes import (  # noqa: E402
-    ASPECT_RATIOS, ResolutionSelector, ScaleResolutionToMegapixels,
-    scale_to_megapixels)
+# The resolution module is pure Python; avoid importing the entire ComfyUI pack.
+spec = importlib.util.spec_from_file_location(
+    "resolution_nodes", os.path.join(PACK, "helpers_nodes", "resolution_nodes.py"))
+resolution_nodes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(resolution_nodes)
+ASPECT_RATIOS = resolution_nodes.ASPECT_RATIOS
+ResolutionSelector = resolution_nodes.ResolutionSelector
+ScaleResolutionToMegapixels = resolution_nodes.ScaleResolutionToMegapixels
+scale_to_megapixels = resolution_nodes.scale_to_megapixels
 
 PASSED = []
 
@@ -119,10 +126,44 @@ def test_pair_node_still_agrees():
     for name, (rw, rh) in ASPECT_RATIOS.items():
         for megapixels in (0.3, 1.0, 2.0):
             for multiple in (8, 32):
-                assert (node.scale(rw, rh, megapixels, multiple)
+                assert (node.scale(rw, rh, megapixels, multiple)[:2]
                         == scale_to_megapixels(rw, rh, megapixels, multiple)
                         == ResolutionSelector().select(name, megapixels, multiple))
     check("both nodes share one implementation and agree on every preset")
+
+
+def test_resize_factor():
+    node = ScaleResolutionToMegapixels()
+    assert node.RETURN_TYPES == ("INT", "INT", "FLOAT")
+    assert node.RETURN_NAMES == ("width", "height", "resize_factor")
+    for width, height in ((1920, 1080), (720, 576), (832, 1216)):
+        for base, pixels in resolution_nodes.MEGAPIXEL_BASES.items():
+            for mp in (0.25, 1.0, 4.0):
+                for upscale in (2, 4):
+                    factors = [node.scale(width, height, mp, multiple, base, upscale)[2]
+                               for multiple in (1, 8, 32, 64)]
+                    assert len(set(factors)) == 1  # alignment must not bias MP target
+                    assert math.isclose(width * height * (factors[0] * upscale) ** 2, mp * pixels)
+    assert node.scale(2000, 2000, 1.0, 32)[2] == 0.25
+    assert node.scale(1000, 1000, 1.0, 32)[2] == 0.5
+    assert node.scale(500, 500, 1.0, 32)[2] == 1.0
+    assert math.isclose(node.scale(2000, 1000, 4.0, 32)[2], math.sqrt(2) / 2)
+    assert node.INPUT_TYPES()["optional"]["upscale_factor"][1]["default"] == 2
+    for invalid in (0, 1, 3, float("nan")):
+        try:
+            node.scale(1920, 1080, 1.0, 32, upscale_factor=invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid upscale factor accepted")
+    for invalid in (0, -1, float("nan"), float("inf")):
+        try:
+            node.scale(832, 1216, invalid, 32)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid MP accepted")
+    check("resize_factor hits FINAL MP after x2/x4, independent of alignment and orientation")
 
 
 if __name__ == "__main__":
@@ -132,4 +173,5 @@ if __name__ == "__main__":
     test_exact_hits()
     test_megapixel_step_is_fine_grained()
     test_pair_node_still_agrees()
+    test_resize_factor()
     print(f"\n{len(PASSED)} checks passed")

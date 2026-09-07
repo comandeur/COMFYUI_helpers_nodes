@@ -384,6 +384,39 @@ Files are numbered on six digits — five would cap at 99 999 frames, about 69
 minutes at 24fps — and written to a `.tmp` then `os.replace`d, so an interrupted
 run leaves a stray temp file rather than a truncated frame.
 
+## RTX Artifact Reduction, AI Green Screen and Background Blur
+
+### Scale Resolution to Megapixels: resize_factor output
+
+`Scale Resolution to Megapixels` now returns `width`, `height`, and a FLOAT
+`resize_factor`. Supply the original image width/height and the desired FINAL MP.
+Set `upscale_factor` to match FlashVSR's `scale`: 2 (default) or 4.
+The factor is `sqrt(megapixels * megapixel_base / (width * height)) / upscale_factor`, calculated
+before alignment; `multiple` still affects only the two dimension outputs.
+Existing width/height connections keep their output positions.
+
+Connect this FLOAT to FlashVSR's `resize_factor` (convert its widget to an input
+if necessary). Example: 2000x1000 (2 MP), targeting 4 MP with x2 gives
+`resize_factor = 0.707107`. The reduction followed by x2 yields approximately
+4 MP in the FINAL output. Integer rounding and FlashVSR's own size constraints can
+affect the actual result. The aligned width/height outputs are not a prediction
+of FlashVSR's output dimensions.
+
+The factor is not clamped: a larger target gives a factor above 1, although
+[FlashVSR's current implementation](https://github.com/naxci1/ComfyUI-FlashVSR_Stable/blob/main/nodes.py)
+only applies input resizing for factors between 0 and 1. Its widget also has
+version-dependent limits. A factor above 1 means the requested final MP exceeds
+what the selected x2/x4 scale can reach: choose x4 or lower the target MP.
+
+Three additional IMAGE-based RTX nodes are available in `Helpers 🧰`:
+`RTX Artifact Reduction` (same-resolution DENOISE cleanup with audio passthrough),
+`RTX AI Green Screen` (foreground and soft mask), and `RTX Background Blur`
+(original image plus foreground mask). All preserve input dimensions.
+
+See [RTX VFX setup, parameters and limitations](docs/RTX_VFX.md). Green Screen and
+Background Blur require the native NVIDIA VFX SDK features in addition to the
+Python package used by the existing upscaler.
+
 ## Tests
 
 ```bash
