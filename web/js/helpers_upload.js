@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { restoreAnimationNumbers } from "./animation_inputs.js";
 
 // The built-in image upload widget only offers png/jpeg/webp in the file
 // dialog, so a .gif can't be picked. We add our own button + drop target with
@@ -180,6 +181,11 @@ app.registerExtension({
         if (!TARGET_NODES.includes(nodeData?.name)) {
             return;
         }
+        const restoreNumbers = function () {
+            restoreAnimationNumbers(this, nodeData.input.required);
+        };
+        chainCallback(nodeType.prototype, "onNodeCreated", restoreNumbers);
+        chainCallback(nodeType.prototype, "onConfigure", restoreNumbers);
         addUploadWidget(nodeType);
         addAnimationPreview(nodeType);
     },
