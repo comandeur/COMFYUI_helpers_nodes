@@ -80,6 +80,51 @@ def scale_to_megapixels(width, height, megapixels, multiple=32,
     return best_size
 
 
+def cap_to_megapixels(width, height, max_megapixels, multiple=1,
+                      megapixel_base="1,000,000"):
+    """Shrink ``width``/``height`` so the area never exceeds a pixel budget.
+
+    Unlike ``scale_to_megapixels`` this is a ceiling, not a target: a size
+    already within budget comes back untouched (not even snapped), and a size
+    over budget comes back at most ``max_megapixels``, never upscaled on either
+    side. Among the floor/ceil combinations that respect the budget, the
+    closest ratio wins and the larger area breaks the tie.
+
+    Returns ``(new_width, new_height, resized)``.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+    if not math.isfinite(max_megapixels) or max_megapixels <= 0:
+        raise ValueError("max_megapixels must be finite and positive")
+    multiple = max(1, int(multiple))
+    budget = max_megapixels * MEGAPIXEL_BASES[megapixel_base]
+
+    if width * height <= budget:
+        return width, height, False
+
+    ratio = width / height
+    scale = math.sqrt(budget / (width * height))
+    exact_width = width * scale
+    exact_height = height * scale
+
+    best_score = None
+    best_size = None
+    for new_width in snap_candidates(exact_width, multiple):
+        for new_height in snap_candidates(exact_height, multiple):
+            if new_width * new_height > budget:
+                continue
+            if new_width > width or new_height > height:
+                continue
+            ratio_error = abs(new_width / new_height - ratio) / ratio
+            score = (round(ratio_error, 9), -new_width * new_height)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_size = (new_width, new_height)
+    if best_size is None:
+        # budget smaller than one multiple x one multiple: best effort
+        best_size = (min(width, multiple), min(height, multiple))
+    return best_size[0], best_size[1], True
+
 class ScaleResolutionToMegapixels:
     @classmethod
     def INPUT_TYPES(s):

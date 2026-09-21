@@ -166,6 +166,41 @@ def test_resize_factor():
     check("resize_factor hits FINAL MP after x2/x4, independent of alignment and orientation")
 
 
+def test_cap_to_megapixels():
+    cap = resolution_nodes.cap_to_megapixels
+    bases = resolution_nodes.MEGAPIXEL_BASES
+    # within budget: untouched, not even snapped
+    assert cap(1000, 1000, 1.0) == (1000, 1000, False)
+    assert cap(811, 1217, 1.0, 64) == (811, 1217, False)
+    assert cap(1024, 1024, 1.0, 1, "1024x1024") == (1024, 1024, False)
+    for width, height in ((4000, 3000), (1920, 1080), (1080, 1920), (6000, 1000),
+                          (4096, 4096), (1025, 1024), (3001, 1999)):
+        for base, pixels in bases.items():
+            for mp in (0.25, 0.5, 1.0, 2.0):
+                for multiple in (1, 8, 32, 64):
+                    w, h, resized = cap(width, height, mp, multiple, base)
+                    if width * height <= mp * pixels:
+                        assert (w, h, resized) == (width, height, False)
+                        continue
+                    assert resized
+                    assert w * h <= mp * pixels, (width, height, mp, multiple, w, h)
+                    assert w <= width and h <= height
+                    assert w % multiple == 0 and h % multiple == 0
+                    if multiple == 1:
+                        # ratio kept to within a pixel's worth of rounding
+                        assert abs(w / h - width / height) / (width / height) < 0.005
+                        # and the budget is actually used
+                        assert w * h > 0.99 * mp * pixels
+    assert cap(4000, 3000, 1.0) == (1154, 866, True)
+    for invalid in (0, -1, float("nan"), float("inf")):
+        try:
+            cap(1000, 1000, invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid max MP accepted")
+    check("cap_to_megapixels: never over budget, never upscales, passes small images through")
+
 if __name__ == "__main__":
     test_presets_cover_the_picker()
     test_matches_core_when_asked()
@@ -174,4 +209,5 @@ if __name__ == "__main__":
     test_megapixel_step_is_fine_grained()
     test_pair_node_still_agrees()
     test_resize_factor()
+    test_cap_to_megapixels()
     print(f"\n{len(PASSED)} checks passed")

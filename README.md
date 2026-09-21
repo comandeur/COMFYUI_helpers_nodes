@@ -251,6 +251,25 @@ tests check across every preset, budget and multiple.
 
 ---
 
+## Limit Image Megapixels 🧰
+
+`CMDR_LimitImageMegapixels`
+
+Image in, image out. If the image is larger than `max_megapixels`, it is shrunk
+— aspect ratio kept — to the largest size that fits under the limit. If it is
+already within the limit it passes through untouched. Never upscales.
+
+| widget | meaning |
+| --- | --- |
+| `image` | the image (or batch) to limit |
+| `max_megapixels` | area ceiling (`1.0` = one million pixels) |
+| `resize_method` | filter used when shrinking: `lanczos` (default), `area`, `bicubic`, `bilinear`, `nearest-exact` |
+| `megapixel_base` | optional, same as above: `1,000,000` or `1024x1024` |
+
+Example: 4000x3000 with `max_megapixels` 1.0 comes out at 1154x866 (0.999 MP).
+
+---
+
 # Chunked long-video pipeline
 
 Four nodes for processing a long source a clip at a time, across several runs,
