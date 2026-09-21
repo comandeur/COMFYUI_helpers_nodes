@@ -255,12 +255,26 @@ tests check across every preset, budget and multiple.
 
 `CMDR_LimitImageMegapixels`
 
-Image in, image out. If the image is larger than `max_megapixels`, it is shrunk
-— aspect ratio kept — to the largest size that fits under the limit. If it is
-already within the limit it passes through untouched. Never upscales.
+Images in, images out. Each image larger than `max_megapixels` is shrunk —
+aspect ratio kept — to the largest size that fits under the limit; images
+already within the limit pass through untouched. Never upscales.
+
+The node grows as you wire it: it starts with one `image` slot, and connecting
+the last slot adds the next one (`image_2`, `image_3`, … up to 16), each with a
+matching output. Disconnecting trims the spare slots again. Every image input
+is optional — handy for reference images that aren't always loaded — and an
+empty slot outputs nothing (`None`).
 
 | widget | meaning |
 | --- | --- |
+| `image`, `image_2`, … | the images (or batches) to limit, all optional |
+| `max_megapixels` | area ceiling (`1.0` = one million pixels), applied to each image |
+| `resize_method` | filter used when shrinking: `lanczos` (default), `area`, `bicubic`, `bilinear`, `nearest-exact` |
+| `megapixel_base` | optional, same as above: `1,000,000` or `1024x1024` |
+
+Example: 4000x3000 with `max_megapixels` 1.0 comes out at 1154x866 (0.999 MP).
+
+--- | --- |
 | `image` | the image (or batch) to limit |
 | `max_megapixels` | area ceiling (`1.0` = one million pixels) |
 | `resize_method` | filter used when shrinking: `lanczos` (default), `area`, `bicubic`, `bilinear`, `nearest-exact` |
