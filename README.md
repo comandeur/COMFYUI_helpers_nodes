@@ -237,9 +237,9 @@ A more precise replacement for ComfyUI's built-in *Resolution Selector*:
 
 * `megapixels` moves in steps of **0.01** instead of 0.1, and starts at 0.01
   instead of 0.1;
-* two presets the built-in doesn't have — **9:21 (Portrait Ultrawide)** and the
-  **5:6 / 6:5** near-square pair — for eleven in total, core's eight included and
-  spelled identically;
+* presets the built-in doesn't have — **9:21 (Portrait Ultrawide)**, the
+  **5:6 / 6:5** near-square pair and the **1:2 / 2:1** panorama pair — for
+  thirteen in total, core's eight included and spelled identically;
 * the ratio survives the rounding. Core rounds each side to its own nearest
   multiple, which drifts: 16:9 at 0.9 MP on a multiple of 32 gives 1280x736, a
   ratio of 1.739 — 2.2% off. This node gives 1312x736, i.e. 1.783, 0.27% off;

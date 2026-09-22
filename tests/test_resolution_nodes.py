@@ -38,6 +38,7 @@ def test_presets_cover_the_picker():
                 "3:4 (Portrait Standard)", "4:3 (Standard)",
                 "2:3 (Portrait Photo)", "3:2 (Photo)",
                 "9:16 (Portrait Widescreen)", "16:9 (Widescreen)",
+                "1:2 (Portrait Panorama)", "2:1 (Panorama)",
                 "9:21 (Portrait Ultrawide)", "21:9 (Ultrawide)"]
     assert list(ASPECT_RATIOS) == expected, list(ASPECT_RATIOS)
     # every preset core offers must still be here, spelled identically
@@ -46,7 +47,7 @@ def test_presets_cover_the_picker():
                  "9:16 (Portrait Widescreen)", "16:9 (Widescreen)",
                  "21:9 (Ultrawide)"):
         assert name in ASPECT_RATIOS, name
-    check("eleven presets: core's eight, plus 9:21, 5:6 and 6:5")
+    check("thirteen presets: core's eight, plus 9:21, 5:6, 6:5 and the 1:2 / 2:1 panorama pair")
 
 
 def test_matches_core_when_asked():

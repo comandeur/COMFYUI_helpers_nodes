@@ -20,6 +20,8 @@ ASPECT_RATIOS = {
     "3:2 (Photo)": (3, 2),
     "9:16 (Portrait Widescreen)": (9, 16),
     "16:9 (Widescreen)": (16, 9),
+    "1:2 (Portrait Panorama)": (1, 2),
+    "2:1 (Panorama)": (2, 1),
     "9:21 (Portrait Ultrawide)": (9, 21),
     "21:9 (Ultrawide)": (21, 9),
 }
